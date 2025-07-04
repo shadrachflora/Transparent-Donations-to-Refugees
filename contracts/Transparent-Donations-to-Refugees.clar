@@ -6,6 +6,10 @@
 (define-constant ERR_CAMPAIGN_NOT_FOUND (err u104))
 (define-constant ERR_CAMPAIGN_INACTIVE (err u105))
 (define-constant ERR_INSUFFICIENT_FUNDS (err u106))
+(define-constant ERR_MILESTONE_NOT_FOUND (err u107))
+(define-constant ERR_BADGE_ALREADY_EARNED (err u108))
+
+(define-data-var next-milestone-id uint u1)
 
 (define-data-var next-refugee-id uint u1)
 (define-data-var next-campaign-id uint u1)
@@ -245,3 +249,70 @@
     (ok true)
   )
 )
+
+(define-map donation-milestones
+  { milestone-id: uint }
+  {
+    name: (string-ascii 50),
+    required-amount: uint,
+    badge-title: (string-ascii 30),
+    active: bool,
+    created-at: uint
+  }
+)
+
+(define-map donor-total-contributions
+  { donor: principal }
+  { total-donated: uint, last-updated: uint }
+)
+
+(define-map earned-badges
+  { donor: principal, milestone-id: uint }
+  { earned-at: uint, badge-title: (string-ascii 30) }
+)
+
+(define-read-only (get-milestone (milestone-id uint))
+  (map-get? donation-milestones { milestone-id: milestone-id })
+)
+
+(define-read-only (get-donor-total (donor principal))
+  (default-to { total-donated: u0, last-updated: u0 }
+    (map-get? donor-total-contributions { donor: donor }))
+)
+
+(define-read-only (get-earned-badge (donor principal) (milestone-id uint))
+  (map-get? earned-badges { donor: donor, milestone-id: milestone-id })
+)
+
+(define-read-only (has-earned-badge (donor principal) (milestone-id uint))
+  (is-some (get-earned-badge donor milestone-id))
+)
+
+(define-public (create-milestone
+  (name (string-ascii 50))
+  (required-amount uint)
+  (badge-title (string-ascii 30))
+)
+  (let
+    (
+      (milestone-id (var-get next-milestone-id))
+      (current-height stacks-block-height)
+    )
+    (asserts! (> required-amount u0) ERR_INVALID_AMOUNT)
+    
+    (map-set donation-milestones
+      { milestone-id: milestone-id }
+      {
+        name: name,
+        required-amount: required-amount,
+        badge-title: badge-title,
+        active: true,
+        created-at: current-height
+      }
+    )
+    
+    (var-set next-milestone-id (+ milestone-id u1))
+    (ok milestone-id)
+  )
+)
+
