@@ -316,3 +316,109 @@
   )
 )
 
+(define-data-var next-report-id uint u1)
+
+(define-map impact-reports
+  { report-id: uint }
+  {
+    reporter: principal,
+    refugee-id: (optional uint),
+    campaign-id: (optional uint),
+    title: (string-ascii 80),
+    description: (string-ascii 400),
+    amount-used: uint,
+    evidence-hash: (string-ascii 64),
+    verified: bool,
+    created-at: uint
+  }
+)
+
+(define-map reporter-stats
+  { reporter: principal }
+  { total-reports: uint, last-report-time: uint, verified-reports: uint }
+)
+
+(define-read-only (get-impact-report (report-id uint))
+  (map-get? impact-reports { report-id: report-id })
+)
+
+(define-read-only (get-reporter-stats (reporter principal))
+  (default-to { total-reports: u0, last-report-time: u0, verified-reports: u0 }
+    (map-get? reporter-stats { reporter: reporter }))
+)
+
+(define-read-only (calculate-trust-score (reporter principal))
+  (let
+    ((stats (get-reporter-stats reporter)))
+    (if (> (get total-reports stats) u0)
+      (/ (* (get verified-reports stats) u100) (get total-reports stats))
+      u0))
+)
+
+(define-public (submit-impact-report
+  (refugee-id (optional uint))
+  (campaign-id (optional uint))
+  (title (string-ascii 80))
+  (description (string-ascii 400))
+  (amount-used uint)
+  (evidence-hash (string-ascii 64))
+)
+  (let
+    ((report-id (var-get next-report-id))
+     (current-time stacks-block-height)
+     (reporter-data (get-reporter-stats tx-sender))
+     (valid-refugee (if (is-some refugee-id)
+                      (is-some (get-refugee (unwrap-panic refugee-id)))
+                      true))
+     (valid-campaign (if (is-some campaign-id)
+                       (is-some (get-campaign (unwrap-panic campaign-id)))
+                       true)))
+    
+    (asserts! (> amount-used u0) ERR_INVALID_AMOUNT)
+    (asserts! (> (len title) u0) ERR_INVALID_AMOUNT)
+    (asserts! (and valid-refugee valid-campaign) ERR_REFUGEE_NOT_FOUND)
+    (asserts! (or (is-some refugee-id) (is-some campaign-id)) ERR_INVALID_AMOUNT)
+    
+    (map-set impact-reports
+      { report-id: report-id }
+      {
+        reporter: tx-sender,
+        refugee-id: refugee-id,
+        campaign-id: campaign-id,
+        title: title,
+        description: description,
+        amount-used: amount-used,
+        evidence-hash: evidence-hash,
+        verified: false,
+        created-at: current-time
+      })
+    
+    (map-set reporter-stats
+      { reporter: tx-sender }
+      {
+        total-reports: (+ (get total-reports reporter-data) u1),
+        last-report-time: current-time,
+        verified-reports: (get verified-reports reporter-data)
+      })
+    
+    (var-set next-report-id (+ report-id u1))
+    (ok report-id)))
+
+(define-public (verify-impact-report (report-id uint))
+  (let
+    ((report-data (unwrap! (get-impact-report report-id) ERR_MILESTONE_NOT_FOUND))
+     (reporter (get reporter report-data))
+     (reporter-data (get-reporter-stats reporter)))
+    
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (not (get verified report-data)) ERR_BADGE_ALREADY_EARNED)
+    
+    (map-set impact-reports
+      { report-id: report-id }
+      (merge report-data { verified: true }))
+    
+    (map-set reporter-stats
+      { reporter: reporter }
+      (merge reporter-data { verified-reports: (+ (get verified-reports reporter-data) u1) }))
+    
+    (ok true)))
