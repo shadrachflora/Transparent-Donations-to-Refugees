@@ -9,6 +9,11 @@
 (define-constant ERR_MILESTONE_NOT_FOUND (err u107))
 (define-constant ERR_BADGE_ALREADY_EARNED (err u108))
 
+(define-data-var emergency-fund-balance uint u0)
+(define-data-var next-emergency-id uint u1)
+(define-constant MIN_EMERGENCY_AMOUNT u1000000)
+(define-constant EMERGENCY_LOCK_PERIOD u144)
+
 (define-data-var next-milestone-id uint u1)
 
 (define-data-var next-refugee-id uint u1)
@@ -422,3 +427,119 @@
       (merge reporter-data { verified-reports: (+ (get verified-reports reporter-data) u1) }))
     
     (ok true)))
+
+
+(define-map emergency-requests
+  { emergency-id: uint }
+  {
+    refugee-id: uint,
+    requester: principal,
+    amount: uint,
+    reason: (string-ascii 200),
+    approved: bool,
+    withdrawn: bool,
+    requested-at: uint,
+    approved-at: (optional uint)
+  }
+)
+
+(define-map emergency-fund-contributions
+  { donor: principal }
+  { total-contributed: uint, last-contribution: uint }
+)
+
+(define-read-only (get-emergency-fund-balance)
+  (var-get emergency-fund-balance)
+)
+
+(define-read-only (get-emergency-request (emergency-id uint))
+  (map-get? emergency-requests { emergency-id: emergency-id })
+)
+
+(define-read-only (get-emergency-contribution (donor principal))
+  (default-to { total-contributed: u0, last-contribution: u0 }
+    (map-get? emergency-fund-contributions { donor: donor }))
+)
+
+(define-public (contribute-to-emergency-fund (amount uint))
+  (let
+    ((current-time stacks-block-height)
+     (existing-contribution (get-emergency-contribution tx-sender)))
+    
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    
+    (map-set emergency-fund-contributions
+      { donor: tx-sender }
+      {
+        total-contributed: (+ (get total-contributed existing-contribution) amount),
+        last-contribution: current-time
+      })
+    
+    (var-set emergency-fund-balance (+ (var-get emergency-fund-balance) amount))
+    (ok true))
+)
+
+(define-public (request-emergency-fund (refugee-id uint) (amount uint) (reason (string-ascii 200)))
+  (let
+    ((emergency-id (var-get next-emergency-id))
+     (refugee-data (unwrap! (get-refugee refugee-id) ERR_REFUGEE_NOT_FOUND))
+     (current-time stacks-block-height))
+    
+    (asserts! (>= amount MIN_EMERGENCY_AMOUNT) ERR_INVALID_AMOUNT)
+    (asserts! (<= amount (var-get emergency-fund-balance)) ERR_INSUFFICIENT_FUNDS)
+    (asserts! (get verified refugee-data) ERR_UNAUTHORIZED)
+    (asserts! (is-eq tx-sender (get wallet refugee-data)) ERR_UNAUTHORIZED)
+    
+    (map-set emergency-requests
+      { emergency-id: emergency-id }
+      {
+        refugee-id: refugee-id,
+        requester: tx-sender,
+        amount: amount,
+        reason: reason,
+        approved: false,
+        withdrawn: false,
+        requested-at: current-time,
+        approved-at: none
+      })
+    
+    (var-set next-emergency-id (+ emergency-id u1))
+    (ok emergency-id))
+)
+
+(define-public (approve-emergency-request (emergency-id uint))
+  (let
+    ((request-data (unwrap! (get-emergency-request emergency-id) ERR_MILESTONE_NOT_FOUND))
+     (current-time stacks-block-height))
+    
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (not (get approved request-data)) ERR_BADGE_ALREADY_EARNED)
+    
+    (map-set emergency-requests
+      { emergency-id: emergency-id }
+      (merge request-data { approved: true, approved-at: (some current-time) }))
+    
+    (ok true))
+)
+
+(define-public (withdraw-emergency-fund (emergency-id uint))
+  (let
+    ((request-data (unwrap! (get-emergency-request emergency-id) ERR_MILESTONE_NOT_FOUND))
+     (current-time stacks-block-height)
+     (approved-time (unwrap! (get approved-at request-data) ERR_UNAUTHORIZED)))
+    
+    (asserts! (get approved request-data) ERR_UNAUTHORIZED)
+    (asserts! (not (get withdrawn request-data)) ERR_BADGE_ALREADY_EARNED)
+    (asserts! (>= current-time (+ approved-time EMERGENCY_LOCK_PERIOD)) ERR_UNAUTHORIZED)
+    (asserts! (is-eq tx-sender (get requester request-data)) ERR_UNAUTHORIZED)
+    
+    (try! (as-contract (stx-transfer? (get amount request-data) tx-sender (get requester request-data))))
+    
+    (map-set emergency-requests
+      { emergency-id: emergency-id }
+      (merge request-data { withdrawn: true }))
+    
+    (var-set emergency-fund-balance (- (var-get emergency-fund-balance) (get amount request-data)))
+    (ok true))
+)
