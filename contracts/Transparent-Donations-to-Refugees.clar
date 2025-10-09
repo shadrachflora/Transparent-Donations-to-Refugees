@@ -14,6 +14,15 @@
 (define-constant MIN_EMERGENCY_AMOUNT u1000000)
 (define-constant EMERGENCY_LOCK_PERIOD u144)
 
+(define-constant TIER_BRONZE u1000000)
+(define-constant TIER_SILVER u5000000)
+(define-constant TIER_GOLD u10000000)
+(define-constant TIER_PLATINUM u25000000)
+(define-constant STREAK_BONUS_BLOCKS u1008)
+(define-constant MAX_LEADERBOARD_SIZE u100)
+
+(define-data-var leaderboard-count uint u0)
+
 (define-data-var next-milestone-id uint u1)
 
 (define-data-var next-refugee-id uint u1)
@@ -541,5 +550,73 @@
       (merge request-data { withdrawn: true }))
     
     (var-set emergency-fund-balance (- (var-get emergency-fund-balance) (get amount request-data)))
+    (ok true))
+)
+
+
+(define-map donor-leaderboard
+  { donor: principal }
+  { total-amount: uint, donation-count: uint, current-streak: uint, last-donation-block: uint, tier: uint, rank: uint }
+)
+
+(define-map tier-names
+  { tier-level: uint }
+  { name: (string-ascii 20) }
+)
+
+(define-read-only (get-donor-leaderboard-entry (donor principal))
+  (default-to { total-amount: u0, donation-count: u0, current-streak: u0, last-donation-block: u0, tier: u0, rank: u0 }
+    (map-get? donor-leaderboard { donor: donor }))
+)
+
+(define-read-only (calculate-donor-tier (total-amount uint))
+  (if (>= total-amount TIER_PLATINUM)
+    u4
+    (if (>= total-amount TIER_GOLD)
+      u3
+      (if (>= total-amount TIER_SILVER)
+        u2
+        (if (>= total-amount TIER_BRONZE)
+          u1
+          u0))))
+)
+
+(define-read-only (get-tier-name (tier-level uint))
+  (if (is-eq tier-level u4)
+    "Platinum Champion"
+    (if (is-eq tier-level u3)
+      "Gold Supporter"
+      (if (is-eq tier-level u2)
+        "Silver Advocate"
+        (if (is-eq tier-level u1)
+          "Bronze Contributor"
+          "Newcomer"))))
+)
+
+(define-read-only (is-streak-active (last-block uint))
+  (let ((current-block stacks-block-height))
+    (<= (- current-block last-block) STREAK_BONUS_BLOCKS))
+)
+
+(define-private (update-donor-leaderboard (donor principal) (amount uint))
+  (let
+    ((entry (get-donor-leaderboard-entry donor))
+     (current-block stacks-block-height)
+     (new-total (+ (get total-amount entry) amount))
+     (new-streak (if (is-streak-active (get last-donation-block entry))
+                   (+ (get current-streak entry) u1)
+                   u1))
+     (new-tier (calculate-donor-tier new-total)))
+    
+    (map-set donor-leaderboard
+      { donor: donor }
+      {
+        total-amount: new-total,
+        donation-count: (+ (get donation-count entry) u1),
+        current-streak: new-streak,
+        last-donation-block: current-block,
+        tier: new-tier,
+        rank: u0
+      })
     (ok true))
 )
