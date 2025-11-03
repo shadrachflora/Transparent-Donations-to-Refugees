@@ -21,6 +21,13 @@
 (define-constant STREAK_BONUS_BLOCKS u1008)
 (define-constant MAX_LEADERBOARD_SIZE u100)
 
+(define-constant ERR_SUBSCRIPTION_NOT_FOUND (err u109))
+(define-constant ERR_SUBSCRIPTION_INACTIVE (err u110))
+(define-constant ERR_SUBSCRIPTION_ALREADY_ACTIVE (err u111))
+(define-constant ERR_PAYMENT_NOT_DUE (err u112))
+
+(define-data-var next-subscription-id uint u1)
+
 (define-data-var leaderboard-count uint u0)
 
 (define-data-var next-milestone-id uint u1)
@@ -618,5 +625,123 @@
         tier: new-tier,
         rank: u0
       })
+    (ok true))
+)
+
+(define-map donation-subscriptions
+  { subscription-id: uint }
+  {
+    donor: principal,
+    refugee-id: (optional uint),
+    campaign-id: (optional uint),
+    amount: uint,
+    interval-blocks: uint,
+    last-payment-block: uint,
+    next-payment-block: uint,
+    total-payments: uint,
+    active: bool,
+    created-at: uint
+  }
+)
+
+(define-map donor-subscriptions
+  { donor: principal, index: uint }
+  { subscription-id: uint }
+)
+
+(define-map donor-subscription-count
+  { donor: principal }
+  { count: uint }
+)
+
+(define-read-only (get-subscription (subscription-id uint))
+  (map-get? donation-subscriptions { subscription-id: subscription-id })
+)
+
+(define-read-only (get-donor-subscription-count (donor principal))
+  (default-to { count: u0 } (map-get? donor-subscription-count { donor: donor }))
+)
+
+(define-read-only (is-payment-due (subscription-id uint))
+  (match (get-subscription subscription-id)
+    sub-data (>= stacks-block-height (get next-payment-block sub-data))
+    false)
+)
+
+(define-public (create-subscription
+  (refugee-id (optional uint))
+  (campaign-id (optional uint))
+  (amount uint)
+  (interval-blocks uint)
+)
+  (let
+    ((subscription-id (var-get next-subscription-id))
+     (current-block stacks-block-height)
+     (donor-count (get count (get-donor-subscription-count tx-sender))))
+    
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (> interval-blocks u0) ERR_INVALID_AMOUNT)
+    (asserts! (or (is-some refugee-id) (is-some campaign-id)) ERR_INVALID_AMOUNT)
+    
+    (map-set donation-subscriptions
+      { subscription-id: subscription-id }
+      {
+        donor: tx-sender,
+        refugee-id: refugee-id,
+        campaign-id: campaign-id,
+        amount: amount,
+        interval-blocks: interval-blocks,
+        last-payment-block: u0,
+        next-payment-block: current-block,
+        total-payments: u0,
+        active: true,
+        created-at: current-block
+      })
+    
+    (map-set donor-subscriptions
+      { donor: tx-sender, index: donor-count }
+      { subscription-id: subscription-id })
+    
+    (map-set donor-subscription-count
+      { donor: tx-sender }
+      { count: (+ donor-count u1) })
+    
+    (var-set next-subscription-id (+ subscription-id u1))
+    (ok subscription-id))
+)
+
+(define-public (execute-subscription-payment (subscription-id uint))
+  (let
+    ((sub-data (unwrap! (get-subscription subscription-id) ERR_SUBSCRIPTION_NOT_FOUND))
+     (current-block stacks-block-height))
+    
+    (asserts! (get active sub-data) ERR_SUBSCRIPTION_INACTIVE)
+    (asserts! (>= current-block (get next-payment-block sub-data)) ERR_PAYMENT_NOT_DUE)
+    
+    (if (is-some (get refugee-id sub-data))
+      (try! (donate-to-refugee (unwrap-panic (get refugee-id sub-data)) (get amount sub-data)))
+      (try! (donate-to-campaign (unwrap-panic (get campaign-id sub-data)) (get amount sub-data))))
+    
+    (map-set donation-subscriptions
+      { subscription-id: subscription-id }
+      (merge sub-data {
+        last-payment-block: current-block,
+        next-payment-block: (+ current-block (get interval-blocks sub-data)),
+        total-payments: (+ (get total-payments sub-data) u1)
+      }))
+    
+    (ok true))
+)
+
+(define-public (toggle-subscription (subscription-id uint))
+  (let
+    ((sub-data (unwrap! (get-subscription subscription-id) ERR_SUBSCRIPTION_NOT_FOUND)))
+    
+    (asserts! (is-eq tx-sender (get donor sub-data)) ERR_UNAUTHORIZED)
+    
+    (map-set donation-subscriptions
+      { subscription-id: subscription-id }
+      (merge sub-data { active: (not (get active sub-data)) }))
+    
     (ok true))
 )
